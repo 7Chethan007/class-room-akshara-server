@@ -1,0 +1,19 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+
+node_modules
+dist
+.env
+
+# Recordings (large files)
+recordings/*.mp4
+recordings/*.wav
+recordings/*.txt
+
+# Editor
+.vscode
+.idea
+.DS_Store
+*.sw?
