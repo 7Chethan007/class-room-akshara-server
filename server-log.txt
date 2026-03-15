@@ -1,0 +1,7 @@
+Γ£à MongoDB connected to 'akshara' database: ac-nh3mgfm-shard-00-02.qk3llt2.mongodb.net
+Γ£à Mediasoup worker created (pid: 22112)
+
+≡ƒÜÇ ClassRoom Live server running on port 5001
+   API:    http://localhost:5001/api
+   Health: http://localhost:5001/api/health
+
