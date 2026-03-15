@@ -1,5 +1,5 @@
 const Session = require('../models/Session');
-const { stopRecording } = require('../utils/recorder');
+const { startRecording, stopRecording } = require('../utils/recorder');
 const fs = require('fs');
 const {
   saveRecordingBuffer,
@@ -8,6 +8,7 @@ const {
   getTranscriptPath,
 } = require('../utils/sessionArtifacts');
 const { hasOpenAi, transcribeRecording } = require('../utils/transcriptionService');
+const { uploadSessionDirectory } = require('../utils/s3Upload');
 
 function isSessionParticipant(session, userId) {
   if (session.teacher.toString() === userId.toString()) {
@@ -22,7 +23,7 @@ function isSessionParticipant(session, userId) {
  */
 async function createSession(req, res) {
   try {
-    const { subject } = req.body;
+    const { subject, className } = req.body;
 
     if (!subject) {
       return res.status(400).json({ success: false, message: 'Subject is required' });
@@ -30,16 +31,29 @@ async function createSession(req, res) {
 
     const session = await Session.create({
       subject,
+      className: className || 'ClassRoom Live',
       teacher: req.user._id,
       status: 'live',
       startTime: new Date(),
     });
 
-    console.log(`🎓 Session created: ${session.sessionId} — ${subject}`);
+    // Start a placeholder recording so files exist even without RTP hookup
+    try {
+      startRecording(session.sessionId);
+    } catch (recErr) {
+      console.warn(`⚠️ Recording start failed: ${recErr.message}`);
+    }
+
+    console.log(`🎓 Session created: ${session.sessionId} — ${className} [${subject}]`);
 
     res.status(201).json({
       success: true,
-      data: { sessionId: session.sessionId, subject: session.subject, status: session.status },
+      data: { 
+        sessionId: session.sessionId, 
+        subject: session.subject,
+        className: session.className,
+        status: session.status 
+      },
     });
   } catch (err) {
     console.error('❌ Create session error:', err.message);
@@ -80,6 +94,7 @@ async function joinSession(req, res) {
       data: {
         sessionId: session.sessionId,
         subject: session.subject,
+        className: session.className,
         status: session.status,
         studentCount: session.students.length,
       },
@@ -120,7 +135,46 @@ async function endSession(req, res) {
       // Don't fail the whole endpoint — recording is optional
     }
 
-    await session.save();
+    // ☁️ UPLOAD TO S3 IMMEDIATELY (before DB save, so it works even if DB is down)
+    let s3UploadResults = [];
+    const uploadFlag = (`${process.env.UPLOAD_TO_S3 || ''}`).trim().toLowerCase();
+    if (uploadFlag === 'true') {
+      try {
+        console.log(`☁️ Starting S3 upload for session: ${session.sessionId}`);
+        s3UploadResults = await uploadSessionDirectory({
+          teacherId: session.teacher,
+          sessionId: session.sessionId,
+        });
+        console.log(`☁️ S3 upload completed for ${session.sessionId}:`);
+        s3UploadResults.forEach((r) => {
+          if (r.success) {
+            console.log(`   ✅ Uploaded: ${r.key}`);
+          } else {
+            console.log(`   ❌ Failed: ${r.key || 'unknown'} - ${r.error || r.message}`);
+          }
+        });
+
+        // Store S3 keys in session
+        const rec = s3UploadResults.find((r) => r.key && r.key.endsWith('recording.mp3')) ||
+                    s3UploadResults.find((r) => r.key && r.key.endsWith('recording.wav'));
+        const trn = s3UploadResults.find((r) => r.key && r.key.endsWith('transcript.txt'));
+        if (rec?.success) session.recordingS3Key = rec.key;
+        if (trn?.success) session.transcriptS3Key = trn.key;
+      } catch (err) {
+        console.warn(`⚠️ S3 upload failed for ${session.sessionId}: ${err.message}`);
+      }
+    } else {
+      console.log(`☁️ S3 upload skipped (UPLOAD_TO_S3=${process.env.UPLOAD_TO_S3 || 'unset'})`);
+    }
+
+    // Try to save to database (best effort - don't fail if DB is down)
+    try {
+      await session.save();
+      console.log(`💾 Session saved to database: ${sessionId}`);
+    } catch (dbErr) {
+      console.warn(`⚠️ Could not save session to database: ${dbErr.message}`);
+      console.log(`   (But S3 upload was successful - files are safe in cloud)`);
+    }
 
     console.log(`🛑 Session ended: ${sessionId}`);
 

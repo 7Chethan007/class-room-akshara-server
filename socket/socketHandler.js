@@ -1,4 +1,10 @@
 const User = require('../models/User');
+const Transcription = require('../models/Transcription');
+const Session = require('../models/Session');
+const { transcribeAudioChunk } = require('../utils/transcriptionService');
+const { appendTranscriptText, saveAudioChunk, finalizeAudioRecording } = require('../utils/sessionArtifacts');
+const fs = require('fs');
+const path = require('path');
 const {
   createRouter,
   createTransport,
@@ -18,6 +24,10 @@ const {
 function initSocketHandler(io) {
   // In-memory live roster by session, used to keep all clients in sync.
   const roomParticipants = new Map();
+  
+  // In-memory active transcriptions by session
+  // structure: { sessionId: { transcriptionId, segments: [], startTime } }
+  const activeTranscriptions = new Map();
 
   function normalizeParticipant({ userId, role, name }) {
     return {
@@ -131,8 +141,28 @@ function initSocketHandler(io) {
     /**
      * end-class — teacher ends the live class
      */
-    socket.on('end-class', ({ sessionId }) => {
+    socket.on('end-class', async ({ sessionId }) => {
       io.to(sessionId).emit('class-ended', {});
+      
+      // Finalize transcription if active
+      const transData = activeTranscriptions.get(sessionId);
+      if (transData) {
+        try {
+          await Transcription.findByIdAndUpdate(
+            transData.transcriptionId,
+            {
+              status: 'completed',
+              isLive: false,
+            },
+            { new: true }
+          );
+          console.log(`📝 Transcription auto-finalized on class end`);
+        } catch (err) {
+          console.error('⚠️ Error finalizing transcription:', err.message);
+        }
+        activeTranscriptions.delete(sessionId);
+      }
+      
       closeRouter(sessionId);
       console.log(`🛑 Class ended: ${sessionId}`);
     });
@@ -279,6 +309,358 @@ function initSocketHandler(io) {
      */
     socket.on('toggle-record', ({ sessionId, enabled }) => {
       console.log(`⏺ Record ${enabled ? 'on' : 'off'} for ${sessionId}`);
+    });
+
+    /**
+     * start-transcription — initialize transcription for session
+     * FIXED: Reuse existing transcription if paused/resumed in same session
+     */
+    socket.on('start-transcription', async ({ sessionId, userId }, callback) => {
+      try {
+        console.log(`🎙️ START-TRANSCRIPTION for session ${sessionId} by teacher ${userId}`);
+
+        // Fetch session to get className and subject
+        const session = await Session.findOne({ sessionId });
+        const className = session?.className || 'N/A';
+        const subject = session?.subject || 'N/A';
+
+        // Check if there's already an incomplete transcription for this session
+        const existingTranscription = await Transcription.findOne({
+          sessionId,
+          status: { $in: ['recording', 'processing', 'completed'] }, // look for recent activity
+        }).sort({ createdAt: -1 }); // most recent
+
+        let transcription = existingTranscription;
+        let isResuming = false;
+
+        if (existingTranscription) {
+          // Resuming: update existing transcription
+          console.log(`♻️ RESUMING existing transcription: ${existingTranscription._id}`);
+          transcription = await Transcription.findByIdAndUpdate(
+            existingTranscription._id,
+            {
+              status: 'recording',
+              isLive: true,
+              lastSegmentTime: new Date(),
+            },
+            { new: true }
+          );
+          isResuming = true;
+        } else {
+          // New session: create fresh transcription
+          transcription = await Transcription.create({
+            sessionId,
+            teacherId: userId,
+            className,
+            subject,
+            status: 'recording',
+            isLive: true,
+          });
+          console.log(`✨ NEW Transcription created: ${transcription._id} [${className} - ${subject}]`);
+        }
+
+        // Create debug header in the transcript file
+        try {
+          const debugHeader = `
+═══════════════════════════════════════════════════════════════════════════════
+🎤 TRANSCRIPTION SESSION DEBUG LOG
+═══════════════════════════════════════════════════════════════════════════════
+Session ID:     ${sessionId}
+Teacher ID:     ${userId}
+Class:          ${className}
+Subject:        ${subject}
+Started:        ${new Date().toISOString()}
+Status:         ${isResuming ? 'RESUMED' : 'NEW'}
+═══════════════════════════════════════════════════════════════════════════════
+
+TRANSCRIPTION STREAM:
+─────────────────────────────────────────────────────────────────────────────
+
+`;
+          appendTranscriptText({
+            teacherId: userId,
+            sessionId,
+            text: debugHeader,
+          });
+          console.log(`📁 Created transcript file at: recordings/${userId}/${sessionId}/transcript.txt`);
+        } catch (fileErr) {
+          console.warn(`⚠️ Could not create transcript file: ${fileErr.message}`);
+        }
+
+        // Load segments into memory if they exist
+        const segments = transcription.segments || [];
+        activeTranscriptions.set(sessionId, {
+          transcriptionId: transcription._id,
+          teacherId: transcription.teacherId,
+          sessionId: sessionId,
+          segments: segments,
+          startTime: Date.now(),
+          chunkCount: 0,
+        });
+
+        console.log(`✅ Transcription started: ${transcription._id} (existing=${isResuming}, segments=${segments.length})`);
+        console.log(`📁 Saving transcripts to: recordings/${transcription.teacherId}/${sessionId}/transcript.txt`);
+        callback({
+          transcriptionId: transcription._id,
+          status: 'recording',
+          isResuming,
+          existingSegments: segments.length,
+          className,
+          subject,
+        });
+      } catch (err) {
+        console.error('❌ start-transcription error:', err.message);
+        callback({ error: err.message });
+      }
+    });
+
+    /**
+     * audio-chunk — receive audio buffer and save to file
+     * DO NOT transcribe individual chunks - accumulate them in recording.wav
+     * We'll transcribe the complete file at end-transcription
+     */
+    socket.on('audio-chunk', async ({ sessionId, audioBuffer, timestamp }, callback) => {
+      try {
+        const bufferSize = audioBuffer?.length || 0;
+        console.log(`[AUDIO-CHUNK] Received: sessionId=${sessionId}, size=${bufferSize}, timestamp=${timestamp}ms`);
+        
+        const transData = activeTranscriptions.get(sessionId);
+        if (!transData) {
+          console.warn('[AUDIO-CHUNK] ⚠️ No active transcription for session:', sessionId);
+          return callback?.({ error: 'No active transcription', isRecording: false });
+        }
+
+        // Validate buffer
+        if (!audioBuffer || (typeof audioBuffer !== 'string' && !Buffer.isBuffer(audioBuffer))) {
+          console.warn('[AUDIO-CHUNK] ❌ Invalid audio buffer type:', typeof audioBuffer);
+          return callback?.({ error: 'Invalid audio buffer' });
+        }
+
+        // Save audio chunk to file immediately
+        try {
+          transData.chunkCount = (transData.chunkCount || 0) + 1;
+          saveAudioChunk({
+            teacherId: transData.teacherId,
+            sessionId: transData.sessionId,
+            audioBuffer,
+            chunkIndex: transData.chunkCount,
+          });
+          console.log(`[AUDIO-CHUNK] 🎵 Audio chunk #${transData.chunkCount} appended (${bufferSize} bytes)`);
+        } catch (audioErr) {
+          console.warn(`[AUDIO-CHUNK] ⚠️ Could not save audio chunk: ${audioErr.message}`);
+        }
+
+        // Track the chunk locally
+        const segment = {
+          timestamp: Math.floor(timestamp / 1000),
+          chunkSize: bufferSize,
+          received: new Date(),
+        };
+
+        if (!transData.segments) transData.segments = [];
+        transData.segments.push(segment);
+
+        callback?.({ status: 'saved', timestamp, chunkCount: transData.chunkCount });
+      } catch (err) {
+        console.error('❌ audio-chunk error:', err.message);
+        callback?.({ error: err.message });
+      }
+    });
+
+    /**
+     * end-transcription — finalize and transcribe the complete recording
+     */
+    socket.on('end-transcription', async ({ sessionId, userId }, callback) => {
+      try {
+        console.log(`🛑 END-TRANSCRIPTION for session ${sessionId}`);
+
+        const transData = activeTranscriptions.get(sessionId);
+        if (!transData) {
+          return callback?.({ error: 'No active transcription' });
+        }
+
+        console.log(`[END-TRANSCRIPTION] 📝 Transcribing complete recording with ${transData.chunkCount} audio chunks...`);
+
+        const recordingDir = path.join(__dirname, '..', 'recordings', transData.teacherId.toString(), sessionId);
+        const recordingPath = path.join(recordingDir, 'recording.wav');
+
+        // Check if recording file exists
+        if (!fs.existsSync(recordingPath)) {
+          console.warn(`[END-TRANSCRIPTION] ⚠️ Recording file not found: ${recordingPath}`);
+        } else {
+          const fileStats = fs.statSync(recordingPath);
+          console.log(`[END-TRANSCRIPTION] ✅ Recording file ready: ${fileStats.size} bytes`);
+
+          // Now transcribe the COMPLETE recording file
+          try {
+            console.log(`[END-TRANSCRIPTION] 🔄 Calling Whisper to transcribe entire session...`);
+            const { transcribeRecording } = require('../utils/transcriptionService');
+            
+            const transcriptionResult = await transcribeRecording(recordingPath);
+            const fullText = transcriptionResult.text || '';
+            const transcriptionSegments = transcriptionResult.segments || [];
+
+            console.log(`[END-TRANSCRIPTION] ✅ Transcription complete: ${fullText.length} chars in ${transcriptionSegments.length} segments`);
+
+            // Update MongoDB with transcription results
+            const finalTranscription = await Transcription.findByIdAndUpdate(
+              transData.transcriptionId,
+              {
+                status: 'completed',
+                isLive: false,
+                text: fullText,
+                segments: transcriptionSegments,
+              },
+              { new: true }
+            );
+
+            // Save final transcription to text file
+            try {
+              const txtPath = path.join(recordingDir, 'transcript.txt');
+              let transcriptContent = '';
+
+              // Append transcription if file exists (keep debug header)
+              if (fs.existsSync(txtPath)) {
+                const existingContent = fs.readFileSync(txtPath, 'utf8');
+                // Extract everything up to "TRANSCRIPTION STREAM"
+                const headerMatch = existingContent.split('─────────────────────────────────────────────────────────────────────────────')[0];
+                transcriptContent = headerMatch;
+              }
+
+              // Add transcription segments
+              transcriptContent += `─────────────────────────────────────────────────────────────────────────────\n`;
+              if (transcriptionSegments.length > 0) {
+                for (let i = 0; i < transcriptionSegments.length; i++) {
+                  const seg = transcriptionSegments[i];
+                  const confidence = seg.confidence ? (seg.confidence * 100).toFixed(0) : '0';
+                  const segText = String(seg.text || seg.id || '').trim();
+                  if (segText) {
+                    transcriptContent += `[${new Date().toISOString()}] [${i}s] [conf:${confidence}%] ${segText}\n`;
+                  }
+                }
+              } else {
+                transcriptContent += `(No text segments found - recording may have been silent)\n`;
+              }
+
+              transcriptContent += `─────────────────────────────────────────────────────────────────────────────\n`;
+              transcriptContent += `Transcription completed: ${new Date().toISOString()}\n`;
+              transcriptContent += `Total segments received: ${transcriptionSegments.length}\n`;
+              transcriptContent += `Total characters: ${fullText.length}\n`;
+              transcriptContent += `Audio chunks: ${transData.chunkCount}\n`;
+              transcriptContent += `Recording file size: ${fileStats.size} bytes\n`;
+              transcriptContent += `═══════════════════════════════════════════════════════════════════════════════\n`;
+
+              fs.writeFileSync(txtPath, transcriptContent);
+              console.log(`[END-TRANSCRIPTION] 📁 Transcript saved: ${txtPath}`);
+            } catch (txtErr) {
+              console.warn(`[END-TRANSCRIPTION] ⚠️ Could not write transcript: ${txtErr.message}`);
+            }
+
+            // Finalize audio recording
+            try {
+              const audioStats = finalizeAudioRecording({
+                teacherId: transData.teacherId,
+                sessionId: sessionId,
+              });
+              console.log(`[END-TRANSCRIPTION] 🎵 Audio recording finalized: ${audioStats.path} (${audioStats.size} bytes)`);
+            } catch (audioErr) {
+              console.warn(`[END-TRANSCRIPTION] ⚠️ Could not finalize audio: ${audioErr.message}`);
+            }
+
+            // Clean up in-memory
+            activeTranscriptions.delete(sessionId);
+
+            console.log(`✅ Session complete: ${transData.transcriptionId}`);
+            console.log(`   📝 Transcribed: ${fullText.length} chars`);
+            console.log(`   🎵 Audio: ${fileStats.size} bytes`);
+
+            // ☁️ UPLOAD TO S3 (after transcription)
+            const uploadFlag = (`${process.env.UPLOAD_TO_S3 || ''}`).trim().toLowerCase();
+            if (uploadFlag === 'true') {
+              try {
+                console.log(`☁️ Starting S3 upload for session: ${sessionId}`);
+                const { uploadSessionDirectory } = require('../utils/s3Upload');
+                const s3Results = await uploadSessionDirectory({
+                  teacherId: transData.teacherId,
+                  sessionId: sessionId,
+                });
+                
+                console.log(`☁️ S3 upload completed for ${sessionId}:`);
+                s3Results.forEach((r) => {
+                  if (r.success) {
+                    console.log(`   ✅ Uploaded: ${r.key}`);
+                  } else {
+                    console.log(`   ❌ Failed: ${r.key || 'unknown'} - ${r.error || r.message}`);
+                  }
+                });
+              } catch (s3Err) {
+                console.warn(`⚠️ S3 upload failed for ${sessionId}: ${s3Err.message}`);
+              }
+            }
+
+            callback({
+              transcriptionId: finalTranscription._id,
+              status: 'completed',
+              segmentCount: transcriptionSegments.length,
+              textLength: fullText.length,
+            });
+
+            // Emit to room
+            io.to(sessionId).emit('transcription-completed', {
+              transcriptionId: finalTranscription._id,
+              segmentCount: transcriptionSegments.length,
+              textLength: fullText.length,
+            });
+
+          } catch (transcribeErr) {
+            console.error(`[END-TRANSCRIPTION] ❌ Transcription error: ${transcribeErr.message}`);
+            
+            // Mark as error but don't fail
+            await Transcription.findByIdAndUpdate(
+              transData.transcriptionId,
+              {
+                status: 'error',
+                isLive: false,
+              }
+            );
+
+            activeTranscriptions.delete(sessionId);
+            callback({ error: `Transcription error: ${transcribeErr.message}` });
+          }
+        }
+      } catch (err) {
+        console.error('❌ end-transcription error:', err.message);
+        callback?.({ error: err.message });
+      }
+    });
+
+    /**
+     * get-transcription — retrieve current transcription
+     */
+    socket.on('get-transcription', async ({ sessionId }, callback) => {
+      try {
+        const transcription = await Transcription.findOne({ sessionId }).select(
+          'text segments status isLive'
+        );
+
+        if (!transcription) {
+          return callback?.({
+            text: '',
+            segments: [],
+            status: 'not-started',
+          });
+        }
+
+        callback({
+          text: transcription.text,
+          segments: transcription.segments,
+          status: transcription.status,
+          isLive: transcription.isLive,
+        });
+      } catch (err) {
+        console.error('❌ get-transcription error:', err.message);
+        callback?.({ error: err.message, text: '', segments: [] });
+      }
     });
 
     /**

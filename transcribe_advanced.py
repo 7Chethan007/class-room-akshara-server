@@ -90,7 +90,7 @@ def convert_wav_to_mp3(wav_path, mp3_path):
 
 def transcribe_audio(audio_path, model_name="tiny", language="en"):
     """
-    Transcribe audio using Whisper with librosa for audio loading
+    Transcribe audio using Whisper with librosa for audio loading (NO FFmpeg needed)
     """
     try:
         import whisper
@@ -122,10 +122,17 @@ def transcribe_audio(audio_path, model_name="tiny", language="en"):
         if audio_data.shape[0] < 8000:  # Less than 0.5 seconds at 16kHz
             print(f"[WHISPER-PY] ⚠️ Audio too short: {audio_data.shape[0]} samples", file=sys.stderr)
         
-        # Transcribe
-        print(f"[WHISPER-PY] Starting transcription...", file=sys.stderr)
+        # Ensure audio is float32 and NOT passed as file path (to avoid FFmpeg)
+        # Whisper can accept audio arrays directly
+        print(f"[WHISPER-PY] Starting transcription (using audio array, NOT file path)...", file=sys.stderr)
+        
+        # Convert to float32 if needed
+        if audio_data.dtype != np.float32:
+            audio_data = audio_data.astype(np.float32)
+        
+        # Transcribe using the audio array directly
         result = model.transcribe(
-            audio_path,
+            audio_data,  # Pass audio array, NOT file path
             language=language,
             fp16=False,
             verbose=False

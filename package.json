@@ -20,6 +20,8 @@
   },
   "homepage": "https://github.com/7Chethan007/class-room-akshara-server#readme",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1009.0",
+    "@aws-sdk/lib-storage": "^3.1009.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -28,8 +30,9 @@
     "mediasoup": "^3.19.18",
     "mongoose": "^7.6.0",
     "multer": "^2.1.1",
-    "openai": "^6.29.0",
-    "socket.io": "^4.8.3"
+    "node-whisper": "^2026.3.3",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"
