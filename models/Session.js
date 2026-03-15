@@ -40,6 +40,33 @@ const sessionSchema = new mongoose.Schema({
   transcriptPath: {
     type: String,
   },
+  recording: {
+    data: Buffer,
+    mimeType: String,
+    size: Number,
+    durationMs: Number,
+    uploadedAt: Date,
+  },
+  transcript: {
+    text: {
+      type: String,
+      default: '',
+    },
+    segments: [
+      {
+        text: String,
+        at: {
+          type: Date,
+          default: Date.now,
+        },
+        by: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+        },
+      },
+    ],
+    updatedAt: Date,
+  },
   createdAt: {
     type: Date,
     default: Date.now,

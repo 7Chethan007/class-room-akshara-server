@@ -82,8 +82,9 @@ async function createTransport(sessionId) {
     throw new Error('No router for this session');
   }
 
+  const announcedIp = process.env.MEDIASOUP_ANNOUNCED_IP;
   const transport = await router.createWebRtcTransport({
-    listenIps: [{ ip: '0.0.0.0', announcedIp: '127.0.0.1' }],
+    listenIps: [{ ip: '0.0.0.0', announcedIp: announcedIp || undefined }],
     enableUdp: true,
     enableTcp: true,
     preferUdp: true,
@@ -118,19 +119,20 @@ async function connectTransport(transportId, dtlsParameters) {
 /**
  * createProducer — creates a producer on a transport
  */
-async function createProducer(sessionId, transportId, userId, kind, rtpParameters) {
+async function createProducer(sessionId, transportId, userId, kind, rtpParameters, appData = {}) {
   const transport = transports[transportId];
   if (!transport) {
     throw new Error('Transport not found');
   }
+  const source = appData.source || kind;
   const producer = await transport.produce({
     kind,
     rtpParameters,
-    appData: { sessionId, userId },
+    appData: { sessionId, userId, source },
   });
 
   if (!sessionProducers[sessionId]) sessionProducers[sessionId] = [];
-  sessionProducers[sessionId].push({ id: producer.id, userId, kind });
+  sessionProducers[sessionId].push({ id: producer.id, userId, kind: source });
 
   producer.on('transportclose', () => {
     sessionProducers[sessionId] = (sessionProducers[sessionId] || []).filter(
