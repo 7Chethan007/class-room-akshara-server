@@ -8,6 +8,7 @@ const {
   listProducers,
   closeTransport,
   closeRouter,
+  getRouterForSession,
 } = require('../mediasoup/mediaHandler');
 
 /**
@@ -40,6 +41,20 @@ function initSocketHandler(io) {
       } catch (err) {
         console.error('❌ join-room error:', err.message);
         socket.emit('error', { message: 'Failed to join room' });
+      }
+    });
+
+    /**
+     * get-router-rtp-capabilities — Device.load support
+     */
+    socket.on('get-router-rtp-capabilities', async ({ sessionId }, callback) => {
+      try {
+        await createRouter(sessionId);
+        const router = getRouterForSession(sessionId);
+        callback(router.rtpCapabilities);
+      } catch (err) {
+        console.error('❌ get-router-rtp-capabilities error:', err.message);
+        callback({ error: err.message });
       }
     });
 
@@ -103,10 +118,17 @@ function initSocketHandler(io) {
     /**
      * produce — teacher/student starts producing media
      */
-    socket.on('produce', async ({ transportId, kind, rtpParameters }, callback) => {
+    socket.on('produce', async ({ transportId, kind, rtpParameters, appData }, callback) => {
       try {
         const sessionId = socket.sessionId;
-        const producer = await createProducer(sessionId, transportId, socket.userId, kind, rtpParameters);
+        const producer = await createProducer(
+          sessionId,
+          transportId,
+          socket.userId,
+          kind,
+          rtpParameters,
+          appData
+        );
 
         socket.to(sessionId).emit('new-producer', { producerId: producer.id, userId: socket.userId, kind });
         callback({ producerId: producer.id });
@@ -124,12 +146,15 @@ function initSocketHandler(io) {
       try {
         const sessionId = socket.sessionId;
         const consumer = await createConsumer(sessionId, transportId, producerId, rtpCapabilities);
+        const producerMeta = listProducers(sessionId).find((p) => p.id === producerId) || {};
 
         callback({
           producerId,
           consumerId: consumer.id,
           kind: consumer.kind,
           rtpParameters: consumer.rtpParameters,
+          producerUserId: producerMeta.userId,
+          producerKind: producerMeta.kind,
         });
       } catch (err) {
         console.error('❌ consume error:', err.message);
@@ -143,6 +168,34 @@ function initSocketHandler(io) {
     socket.on('get-producers', ({ sessionId }, callback) => {
       const producers = listProducers(sessionId);
       callback({ producers });
+    });
+
+    /**
+     * resume-consumer — acknowledges consumer resume (noop placeholder)
+     */
+    socket.on('resume-consumer', ({ consumerId }, callback) => {
+      callback?.({ resumed: true, consumerId });
+    });
+
+    /**
+     * chat-message — relay chat to room
+     */
+    socket.on('chat-message', ({ sessionId, name, message }) => {
+      io.to(sessionId).emit('chat-message', { name, message });
+    });
+
+    /**
+     * toggle-transcript — placeholder hook
+     */
+    socket.on('toggle-transcript', ({ sessionId, enabled }) => {
+      console.log(`📝 Transcript ${enabled ? 'on' : 'off'} for ${sessionId}`);
+    });
+
+    /**
+     * toggle-record — placeholder hook
+     */
+    socket.on('toggle-record', ({ sessionId, enabled }) => {
+      console.log(`⏺ Record ${enabled ? 'on' : 'off'} for ${sessionId}`);
     });
 
     /**

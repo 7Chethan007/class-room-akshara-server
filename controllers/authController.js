@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const User = require('../models/User');
 
 /**
@@ -27,7 +28,13 @@ async function register(req, res) {
       success: true,
       data: {
         token,
-        user: { id: user._id, name: user.name, email: user.email, role: user.role },
+        user: {
+          id: user._id, // backward-compatible
+          _id: user._id, // preferred for frontend socket payloads
+          name: user.name,
+          email: user.email,
+          role: user.role,
+        },
       },
     });
   } catch (err) {
@@ -64,7 +71,13 @@ async function login(req, res) {
       success: true,
       data: {
         token,
-        user: { id: user._id, name: user.name, email: user.email, role: user.role },
+        user: {
+          id: user._id,
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+        },
       },
     });
   } catch (err) {
@@ -73,4 +86,64 @@ async function login(req, res) {
   }
 }
 
-module.exports = { register, login };
+/**
+ * quickAccess — no-password entry for teacher/student classroom flow.
+ * Creates user if needed, otherwise reuses existing matching role and returns JWT.
+ */
+async function quickAccess(req, res) {
+  try {
+    const { name, email, role } = req.body;
+
+    if (!name || !email || !role) {
+      return res.status(400).json({ success: false, message: 'name, email and role are required' });
+    }
+
+    if (!['teacher', 'student'].includes(role)) {
+      return res.status(400).json({ success: false, message: 'Only teacher and student roles are supported' });
+    }
+
+    let user = await User.findOne({ email: email.toLowerCase().trim() });
+
+    if (user && user.role !== role) {
+      return res.status(400).json({
+        success: false,
+        message: `This email is already registered as ${user.role}. Use a different email for ${role}.`,
+      });
+    }
+
+    if (!user) {
+      const tempPassword = crypto.randomBytes(16).toString('hex');
+      user = await User.create({
+        name: name.trim(),
+        email: email.toLowerCase().trim(),
+        role,
+        password: tempPassword,
+      });
+      console.log(`✅ Quick access user created: ${user.email} (${user.role})`);
+    } else if (user.name !== name.trim()) {
+      user.name = name.trim();
+      await user.save();
+    }
+
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        token,
+        user: {
+          id: user._id,
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('❌ Quick access error:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+}
+
+module.exports = { register, login, quickAccess };
