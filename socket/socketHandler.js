@@ -16,6 +16,49 @@ const {
  * Called once from server.js with the io instance.
  */
 function initSocketHandler(io) {
+  // In-memory live roster by session, used to keep all clients in sync.
+  const roomParticipants = new Map();
+
+  function normalizeParticipant({ userId, role, name }) {
+    return {
+      userId: String(userId),
+      role,
+      name: name || 'Unknown',
+    };
+  }
+
+  function upsertParticipant(sessionId, participant) {
+    const key = String(sessionId);
+    const list = roomParticipants.get(key) || [];
+    const normalized = normalizeParticipant(participant);
+    const idx = list.findIndex((p) => p.userId === normalized.userId);
+    if (idx >= 0) {
+      list[idx] = normalized;
+    } else {
+      list.push(normalized);
+    }
+    roomParticipants.set(key, list);
+    return list;
+  }
+
+  function removeParticipantFromRoom(sessionId, userId) {
+    const key = String(sessionId);
+    const list = roomParticipants.get(key) || [];
+    const next = list.filter((p) => p.userId !== String(userId));
+    if (next.length) {
+      roomParticipants.set(key, next);
+      return next;
+    }
+    roomParticipants.delete(key);
+    return [];
+  }
+
+  function emitRoomParticipants(sessionId) {
+    const key = String(sessionId);
+    const participants = roomParticipants.get(key) || [];
+    io.to(key).emit('room-participants', { participants });
+  }
+
   io.on('connection', (socket) => {
     console.log(`🔌 Socket connected: ${socket.id}`);
     socket.transportIds = [];
@@ -36,7 +79,23 @@ function initSocketHandler(io) {
         // Ensure router exists for this session
         await createRouter(sessionId);
 
+        upsertParticipant(sessionId, { userId, role, name });
+        emitRoomParticipants(sessionId);
         socket.to(sessionId).emit('user-joined', { userId, role, name });
+
+        // Send all existing producers so late-joiners can consume them
+        const existingProducers = listProducers(sessionId);
+        console.log(`📋 EXISTING PRODUCERS for ${sessionId}:`, existingProducers.map(p => `${p.kind}(${p.userId})`).join(', '));
+        if (existingProducers.length) {
+          socket.emit('existing-producers', {
+            producers: existingProducers.map((p) => ({
+              producerId: p.id,
+              userId: p.userId,
+              kind: p.kind,
+            })),
+          });
+        }
+
         console.log(`📥 ${name} (${role}) joined room ${sessionId}`);
       } catch (err) {
         console.error('❌ join-room error:', err.message);
@@ -63,6 +122,8 @@ function initSocketHandler(io) {
      */
     socket.on('leave-room', ({ sessionId, userId }) => {
       socket.leave(sessionId);
+      removeParticipantFromRoom(sessionId, userId);
+      emitRoomParticipants(sessionId);
       socket.to(sessionId).emit('user-left', { userId });
       console.log(`📤 User ${userId} left room ${sessionId}`);
     });
@@ -130,12 +191,31 @@ function initSocketHandler(io) {
           appData
         );
 
+        const source = appData?.source || kind;
+        console.log(`🎬 PRODUCE: kind=${kind}, source=${source}, userId=${socket.userId}, sessionId=${sessionId}`);
+        
         socket.to(sessionId).emit('new-producer', { producerId: producer.id, userId: socket.userId, kind });
+        console.log(`📢 Broadcasted new-producer: ${producer.id} (${source}) to room ${sessionId}`);
+        
         callback({ producerId: producer.id });
         console.log(`🎬 Producer created: ${kind} by ${socket.userId}`);
       } catch (err) {
         console.error('❌ produce error:', err.message);
         callback({ error: err.message });
+      }
+    });
+
+    /**
+     * close-producer — teacher stops producing media (screen share, etc)
+     */
+    socket.on('close-producer', ({ producerId }) => {
+      try {
+        const sessionId = socket.sessionId;
+        console.log(`🛑 Producer closed: ${producerId} by ${socket.userId}`);
+        // Broadcast to all clients that this producer closed
+        io.to(sessionId).emit('producer-closed', { producerId, userId: socket.userId });
+      } catch (err) {
+        console.error('❌ close-producer error:', err.message);
       }
     });
 
@@ -148,6 +228,8 @@ function initSocketHandler(io) {
         const consumer = await createConsumer(sessionId, transportId, producerId, rtpCapabilities);
         const producerMeta = listProducers(sessionId).find((p) => p.id === producerId) || {};
 
+        console.log(`🍴 CONSUME: producerId=${producerId}, kind=${consumer.kind}, producerKind=${producerMeta.kind}, userId=${socket.userId}`);
+
         callback({
           producerId,
           consumerId: consumer.id,
@@ -156,6 +238,7 @@ function initSocketHandler(io) {
           producerUserId: producerMeta.userId,
           producerKind: producerMeta.kind,
         });
+        console.log(`✅ Consumer created: ${consumer.id} for producer ${producerId} (${producerMeta.kind})`);
       } catch (err) {
         console.error('❌ consume error:', err.message);
         callback({ error: err.message });
@@ -203,6 +286,8 @@ function initSocketHandler(io) {
      */
     socket.on('disconnect', () => {
       if (socket.sessionId) {
+        removeParticipantFromRoom(socket.sessionId, socket.userId);
+        emitRoomParticipants(socket.sessionId);
         socket.to(socket.sessionId).emit('user-left', { userId: socket.userId });
       }
       socket.transportIds.forEach((id) => closeTransport(id));

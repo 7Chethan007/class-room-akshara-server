@@ -1,4 +1,20 @@
 const mediasoup = require('mediasoup');
+const os = require('os');
+
+// Detect the machine's local-network IPv4 address (first non-internal).
+// Used as announcedIp fallback so LAN devices can reach the SFU.
+function getLocalIp() {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return '127.0.0.1'; // ultimate fallback
+}
+const LOCAL_IP = getLocalIp();
 
 // Store: worker + per-session routers
 let worker = null;
@@ -82,9 +98,9 @@ async function createTransport(sessionId) {
     throw new Error('No router for this session');
   }
 
-  const announcedIp = process.env.MEDIASOUP_ANNOUNCED_IP;
+  const announcedIp = process.env.MEDIASOUP_ANNOUNCED_IP || LOCAL_IP;
   const transport = await router.createWebRtcTransport({
-    listenIps: [{ ip: '0.0.0.0', announcedIp: announcedIp || undefined }],
+    listenIps: [{ ip: '0.0.0.0', announcedIp }],
     enableUdp: true,
     enableTcp: true,
     preferUdp: true,
