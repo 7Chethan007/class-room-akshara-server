@@ -46,6 +46,12 @@ const sessionSchema = new mongoose.Schema({
   transcriptPath: {
     type: String,
   },
+  recordingS3Key: {
+    type: String,
+  },
+  transcriptS3Key: {
+    type: String,
+  },
   recording: {
     data: Buffer,
     mimeType: String,

@@ -574,6 +574,30 @@ TRANSCRIPTION STREAM:
             console.log(`   📝 Transcribed: ${fullText.length} chars`);
             console.log(`   🎵 Audio: ${fileStats.size} bytes`);
 
+            // ☁️ UPLOAD TO S3 (after transcription)
+            const uploadFlag = (`${process.env.UPLOAD_TO_S3 || ''}`).trim().toLowerCase();
+            if (uploadFlag === 'true') {
+              try {
+                console.log(`☁️ Starting S3 upload for session: ${sessionId}`);
+                const { uploadSessionDirectory } = require('../utils/s3Upload');
+                const s3Results = await uploadSessionDirectory({
+                  teacherId: transData.teacherId,
+                  sessionId: sessionId,
+                });
+                
+                console.log(`☁️ S3 upload completed for ${sessionId}:`);
+                s3Results.forEach((r) => {
+                  if (r.success) {
+                    console.log(`   ✅ Uploaded: ${r.key}`);
+                  } else {
+                    console.log(`   ❌ Failed: ${r.key || 'unknown'} - ${r.error || r.message}`);
+                  }
+                });
+              } catch (s3Err) {
+                console.warn(`⚠️ S3 upload failed for ${sessionId}: ${s3Err.message}`);
+              }
+            }
+
             callback({
               transcriptionId: finalTranscription._id,
               status: 'completed',

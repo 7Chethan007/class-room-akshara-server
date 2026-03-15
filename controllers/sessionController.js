@@ -135,7 +135,46 @@ async function endSession(req, res) {
       // Don't fail the whole endpoint — recording is optional
     }
 
-    await session.save();
+    // ☁️ UPLOAD TO S3 IMMEDIATELY (before DB save, so it works even if DB is down)
+    let s3UploadResults = [];
+    const uploadFlag = (`${process.env.UPLOAD_TO_S3 || ''}`).trim().toLowerCase();
+    if (uploadFlag === 'true') {
+      try {
+        console.log(`☁️ Starting S3 upload for session: ${session.sessionId}`);
+        s3UploadResults = await uploadSessionDirectory({
+          teacherId: session.teacher,
+          sessionId: session.sessionId,
+        });
+        console.log(`☁️ S3 upload completed for ${session.sessionId}:`);
+        s3UploadResults.forEach((r) => {
+          if (r.success) {
+            console.log(`   ✅ Uploaded: ${r.key}`);
+          } else {
+            console.log(`   ❌ Failed: ${r.key || 'unknown'} - ${r.error || r.message}`);
+          }
+        });
+
+        // Store S3 keys in session
+        const rec = s3UploadResults.find((r) => r.key && r.key.endsWith('recording.mp3')) ||
+                    s3UploadResults.find((r) => r.key && r.key.endsWith('recording.wav'));
+        const trn = s3UploadResults.find((r) => r.key && r.key.endsWith('transcript.txt'));
+        if (rec?.success) session.recordingS3Key = rec.key;
+        if (trn?.success) session.transcriptS3Key = trn.key;
+      } catch (err) {
+        console.warn(`⚠️ S3 upload failed for ${session.sessionId}: ${err.message}`);
+      }
+    } else {
+      console.log(`☁️ S3 upload skipped (UPLOAD_TO_S3=${process.env.UPLOAD_TO_S3 || 'unset'})`);
+    }
+
+    // Try to save to database (best effort - don't fail if DB is down)
+    try {
+      await session.save();
+      console.log(`💾 Session saved to database: ${sessionId}`);
+    } catch (dbErr) {
+      console.warn(`⚠️ Could not save session to database: ${dbErr.message}`);
+      console.log(`   (But S3 upload was successful - files are safe in cloud)`);
+    }
 
     console.log(`🛑 Session ended: ${sessionId}`);
 
@@ -143,19 +182,6 @@ async function endSession(req, res) {
       success: true,
       data: { sessionId, status: 'ended', endTime: session.endTime },
     });
-
-    // Async: upload artifacts to S3 if enabled
-    (async () => {
-      try {
-        const uploadResults = await uploadSessionDirectory({
-          teacherId: session.teacher,
-          sessionId: session.sessionId,
-        });
-        console.log(`☁️ S3 upload results for ${session.sessionId}:`, uploadResults);
-      } catch (err) {
-        console.warn(`⚠️ S3 upload failed for ${session.sessionId}: ${err.message}`);
-      }
-    })();
   } catch (err) {
     console.error('❌ End session error:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });

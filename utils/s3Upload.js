@@ -6,7 +6,7 @@ const { getS3Client } = require('../config/s3');
 const { getSessionDir } = require('./sessionArtifacts');
 
 const bucket = process.env.S3_BUCKET || process.env.AWS_BUCKET;
-const uploadEnabled = process.env.UPLOAD_TO_S3 === 'true';
+const uploadEnabled = (`${process.env.UPLOAD_TO_S3 || ''}`).trim().toLowerCase() === 'true';
 
 /**
  * uploadFile — uploads a single file to S3 with the provided key.
@@ -37,12 +37,13 @@ async function uploadFile(localPath, key) {
  */
 async function uploadSessionDirectory({ teacherId, sessionId }) {
   if (!uploadEnabled) {
-    return { success: false, message: 'S3 upload disabled' };
+    return [{ success: false, message: 'S3 upload disabled' }];
   }
   const dir = getSessionDir({ teacherId, sessionId });
   if (!fs.existsSync(dir)) {
     throw new Error(`Session directory not found: ${dir}`);
   }
+  console.log(`☁️ Starting S3 upload from ${dir} to bucket ${bucket}`);
 
   const results = [];
   const files = fs.readdirSync(dir);
