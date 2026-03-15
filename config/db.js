@@ -6,8 +6,23 @@ const mongoose = require('mongoose');
  */
 async function connectDB() {
   try {
-    const conn = await mongoose.connect(process.env.MONGO_URI);
-    console.log(`✅ MongoDB connected: ${conn.connection.host}`);
+    // Connect to akshara database
+    const mongoUri = process.env.MONGO_URI;
+    // If URI already has path, replace it; otherwise append /akshara
+    let uriWithDB = mongoUri;
+    
+    if (mongoUri.includes('mongodb')) {
+      // Remove any existing database name from URI
+      const baseUri = mongoUri.split('?')[0];
+      const lastSlashIndex = baseUri.lastIndexOf('/');
+      const baseUriPath = baseUri.substring(0, lastSlashIndex + 1);
+      const queryParams = mongoUri.includes('?') ? '?' + mongoUri.split('?')[1] : '';
+      
+      uriWithDB = baseUriPath + 'akshara' + queryParams;
+    }
+    
+    const conn = await mongoose.connect(uriWithDB);
+    console.log(`✅ MongoDB connected to 'akshara' database: ${conn.connection.host}`);
   } catch (err) {
     console.warn(`⚠️ MongoDB connection failed: ${err.message}`);
     console.warn('   Server will run without database. Auth and session routes will fail.');

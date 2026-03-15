@@ -12,6 +12,12 @@ const sessionSchema = new mongoose.Schema({
     required: [true, 'Subject is required'],
     trim: true,
   },
+  className: {
+    type: String,
+    required: [true, 'Class name is required'],
+    trim: true,
+    example: 'Class 1, Class 2, College A, etc.',
+  },
   teacher: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

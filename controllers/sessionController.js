@@ -1,5 +1,5 @@
 const Session = require('../models/Session');
-const { stopRecording } = require('../utils/recorder');
+const { startRecording, stopRecording } = require('../utils/recorder');
 const fs = require('fs');
 const {
   saveRecordingBuffer,
@@ -8,6 +8,7 @@ const {
   getTranscriptPath,
 } = require('../utils/sessionArtifacts');
 const { hasOpenAi, transcribeRecording } = require('../utils/transcriptionService');
+const { uploadSessionDirectory } = require('../utils/s3Upload');
 
 function isSessionParticipant(session, userId) {
   if (session.teacher.toString() === userId.toString()) {
@@ -22,7 +23,7 @@ function isSessionParticipant(session, userId) {
  */
 async function createSession(req, res) {
   try {
-    const { subject } = req.body;
+    const { subject, className } = req.body;
 
     if (!subject) {
       return res.status(400).json({ success: false, message: 'Subject is required' });
@@ -30,16 +31,29 @@ async function createSession(req, res) {
 
     const session = await Session.create({
       subject,
+      className: className || 'ClassRoom Live',
       teacher: req.user._id,
       status: 'live',
       startTime: new Date(),
     });
 
-    console.log(`🎓 Session created: ${session.sessionId} — ${subject}`);
+    // Start a placeholder recording so files exist even without RTP hookup
+    try {
+      startRecording(session.sessionId);
+    } catch (recErr) {
+      console.warn(`⚠️ Recording start failed: ${recErr.message}`);
+    }
+
+    console.log(`🎓 Session created: ${session.sessionId} — ${className} [${subject}]`);
 
     res.status(201).json({
       success: true,
-      data: { sessionId: session.sessionId, subject: session.subject, status: session.status },
+      data: { 
+        sessionId: session.sessionId, 
+        subject: session.subject,
+        className: session.className,
+        status: session.status 
+      },
     });
   } catch (err) {
     console.error('❌ Create session error:', err.message);
@@ -80,6 +94,7 @@ async function joinSession(req, res) {
       data: {
         sessionId: session.sessionId,
         subject: session.subject,
+        className: session.className,
         status: session.status,
         studentCount: session.students.length,
       },
@@ -128,6 +143,19 @@ async function endSession(req, res) {
       success: true,
       data: { sessionId, status: 'ended', endTime: session.endTime },
     });
+
+    // Async: upload artifacts to S3 if enabled
+    (async () => {
+      try {
+        const uploadResults = await uploadSessionDirectory({
+          teacherId: session.teacher,
+          sessionId: session.sessionId,
+        });
+        console.log(`☁️ S3 upload results for ${session.sessionId}:`, uploadResults);
+      } catch (err) {
+        console.warn(`⚠️ S3 upload failed for ${session.sessionId}: ${err.message}`);
+      }
+    })();
   } catch (err) {
     console.error('❌ End session error:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
