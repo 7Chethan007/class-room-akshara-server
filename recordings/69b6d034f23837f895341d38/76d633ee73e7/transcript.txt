@@ -1,0 +1,22 @@
+
+═══════════════════════════════════════════════════════════════════════════════
+🎤 TRANSCRIPTION SESSION DEBUG LOG
+═══════════════════════════════════════════════════════════════════════════════
+Session ID:     76d633ee73e7
+Teacher ID:     69b6d034f23837f895341d38
+Class:          Class 1
+Subject:        Mathematics - Chapter 1
+Started:        2026-03-16T03:22:42.019Z
+Status:         NEW
+═══════════════════════════════════════════════════════════════════════════════
+
+TRANSCRIPTION STREAM:
+─────────────────────────────────────────────────────────────────────────────
+(No text segments found - recording may have been silent)
+─────────────────────────────────────────────────────────────────────────────
+Transcription completed: 2026-03-16T03:24:23.738Z
+Total segments received: 0
+Total characters: 0
+Audio chunks: 755
+Recording file size: 6168620 bytes
+═══════════════════════════════════════════════════════════════════════════════
