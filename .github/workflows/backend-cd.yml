@@ -16,16 +16,11 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_KEY }}
           script: |
-            # Create docker network if it doesn't exist
-            docker network create akshara-net || true
-            
             IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/akshara-backend:${{ github.event.workflow_run.head_commit.id }}
             docker pull $IMAGE || docker pull ${{ secrets.DOCKERHUB_USERNAME }}/akshara-backend:latest
             docker stop akshara-backend || true
             docker rm akshara-backend || true
             docker run -d \
               --name akshara-backend \
-              --network akshara-net \
-              -p ${EC2_BACKEND_PORT:-5001}:5001 \
-              --env-file /home/ubuntu/.env.backend 2>/dev/null || true \
+              -p 5001:5001 \
               $IMAGE
