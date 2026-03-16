@@ -57,7 +57,17 @@ async function createSession(req, res) {
     });
   } catch (err) {
     console.error('❌ Create session error:', err.message);
-    res.status(500).json({ success: false, message: 'Server error' });
+    
+    // Check if it's a database connection error
+    if (err.message.includes('buffering timed out') || err.name === 'MongooseError') {
+      return res.status(503).json({ 
+        success: false, 
+        message: 'Database connection failed. Please ensure MongoDB is running.',
+        details: 'MongoDB is not connected. Start MongoDB and try again.'
+      });
+    }
+    
+    res.status(500).json({ success: false, message: 'Server error: ' + err.message });
   }
 }
 
