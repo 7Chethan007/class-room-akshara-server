@@ -1,0 +1,26 @@
+name: Backend CD
+on:
+  workflow_run:
+    workflows: [ "Backend CI" ]
+    types: [ completed ]
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_KEY }}
+          script: |
+            IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/akshara-backend:${{ github.event.workflow_run.head_commit.id }}
+            docker pull $IMAGE || docker pull ${{ secrets.DOCKERHUB_USERNAME }}/akshara-backend:latest
+            docker stop akshara-backend || true
+            docker rm akshara-backend || true
+            docker run -d \
+              --name akshara-backend \
+              -p ${EC2_BACKEND_PORT:-5000}:5000 \
+              $IMAGE
